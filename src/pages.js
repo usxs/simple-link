@@ -23,7 +23,7 @@ function header() {
   return `<header class="site-header">
   <div class="header-inner">
     <a class="brand" href="/" aria-label="简链首页">
-      <span class="brand-mark">简</span>
+      <span class="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="32" height="32"></span>
       <span class="brand-name">简链</span>
     </a>
     <div class="header-actions">
