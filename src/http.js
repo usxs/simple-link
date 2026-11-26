@@ -27,7 +27,12 @@ export function json(data, status = 200, extraHeaders = {}) {
     'X-Content-Type-Options': 'nosniff'
   });
   for (const [key, value] of Object.entries(extraHeaders)) {
-    if (value !== undefined && value !== null) headers.set(key, value);
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+    } else {
+      headers.set(key, value);
+    }
   }
   return new Response(JSON.stringify(data), { status, headers });
 }

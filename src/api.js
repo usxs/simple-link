@@ -13,6 +13,9 @@ import { normalizeDestination, validateSlug } from './validate.js';
 
 const CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const DAY_MS = 86400000;
+const ADMIN_COOKIE = 'sl_admin';
+const BLOG_SESSION_COOKIE = 'console_session';
+const ADMIN_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 export async function handleApi(request, env, url) {
   const segments = url.pathname.split('/').filter(Boolean);
@@ -49,13 +52,25 @@ export async function handleApi(request, env, url) {
     }
   }
 
+  if (route === 'admin' && segments[2] === 'session' && readOnly) {
+    return adminSession(request, env);
+  }
+
+  if (route === 'admin' && segments[2] === 'login' && method === 'POST') {
+    return adminLogin(request, env);
+  }
+
+  if (route === 'admin' && segments[2] === 'logout' && method === 'POST') {
+    return adminLogout(request, env);
+  }
+
   if (route === 'admin' && segments[2] === 'overview' && readOnly) {
-    requireAdmin(request, env);
+    await requireAdmin(request, env);
     return adminOverview(env, url);
   }
 
   if (route === 'admin' && segments[2] === 'links' && segments.length === 4 && method === 'POST') {
-    requireAdmin(request, env);
+    await requireAdmin(request, env);
     return adminAction(request, env, segments[3]);
   }
 
@@ -129,6 +144,10 @@ function getConfig(env, url) {
   const limits = readLimits(env);
   const turnstileSiteKey = String(env.TURNSTILE_SITE_KEY || '').trim();
   const turnstileSecret = String(env.TURNSTILE_SECRET || '').trim();
+  const adminToken = Boolean(String(env.ADMIN_TOKEN || '').trim());
+  const blogOrigin = getBlogOrigin(env);
+  const ssoOrigin = safeHttpUrl(env.BLOG_SSO_ORIGIN) || blogOrigin;
+  const sso = Boolean(blogOrigin && ssoOrigin && String(env.BLOG_SSO_SECRET || '').trim());
   return json({
     ok: true,
     brand: '简链',
@@ -138,7 +157,15 @@ function getConfig(env, url) {
     limits,
     ttlOptions: ttlOptions(limits),
     turnstileSiteKey: turnstileSiteKey && turnstileSecret ? turnstileSiteKey : null,
-    adminEnabled: Boolean(String(env.ADMIN_TOKEN || '').trim()),
+    adminEnabled: adminToken || Boolean(blogOrigin),
+    adminAuth: {
+      blog: Boolean(blogOrigin),
+      blogOrigin,
+      token: adminToken,
+      auto: Boolean(blogOrigin),
+      sso,
+      ssoUrl: sso ? new URL(ssoOrigin).origin + '/__simple_link_sso' : ''
+    },
     links: {
       sibling: safeHttpUrl(env.SIBLING_URL),
       blog: safeHttpUrl(env.BLOG_URL),
@@ -437,14 +464,216 @@ async function getStats(env, code, url) {
   });
 }
 
-function requireAdmin(request, env) {
-  const expected = String(env.ADMIN_TOKEN || '').trim();
-  if (!expected) throw new ApiError(404, '管理功能未开启');
-  const header = request.headers.get('Authorization') || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  if (!token || !timingSafeEqual(token, expected)) {
-    throw new ApiError(401, '管理令牌不正确');
+function getBlogOrigin(env) {
+  const raw = safeHttpUrl(env.BLOG_ORIGIN);
+  return raw ? new URL(raw).origin : '';
+}
+
+function readCookie(request, name) {
+  const header = request.headers.get('Cookie') || '';
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    if (part.slice(0, index).trim() !== name) continue;
+    const value = part.slice(index + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return '';
+    }
   }
+  return '';
+}
+
+function cookieSecure(request) {
+  try {
+    return new URL(request.url).protocol === 'https:';
+  } catch {
+    return true;
+  }
+}
+
+function adminCookieHeader(request, token) {
+  const secure = cookieSecure(request) ? '; Secure' : '';
+  return ADMIN_COOKIE + '=' + encodeURIComponent(token) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + ADMIN_COOKIE_MAX_AGE + secure;
+}
+
+function blogCookieDomain(env) {
+  const raw = String(env.BLOG_COOKIE_DOMAIN || '').trim().toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(raw)) return '';
+  return raw.startsWith('.') ? raw : '.' + raw;
+}
+
+function clearAdminCookieHeader(request) {
+  const secure = cookieSecure(request) ? '; Secure' : '';
+  return ADMIN_COOKIE + '=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' + secure;
+}
+
+function clearBlogCookieHeader(request, env) {
+  const secure = cookieSecure(request) ? '; Secure' : '';
+  const domain = blogCookieDomain(env);
+  const domainPart = domain ? '; Domain=' + domain : '';
+  return BLOG_SESSION_COOKIE + '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' + domainPart + secure;
+}
+
+async function blogStatus(env, token) {
+  const origin = getBlogOrigin(env);
+  if (!origin || !token || token.length > 256) return null;
+  try {
+    const response = await fetch(origin + '/api/auth/status', {
+      headers: {
+        Accept: 'application/json',
+        Cookie: BLOG_SESSION_COOKIE + '=' + encodeURIComponent(token)
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || data.ok !== true || data.authed !== true) return null;
+    return { username: String(data.username || '') };
+  } catch {
+    return null;
+  }
+}
+
+async function authenticateAdmin(request, env) {
+  const expected = String(env.ADMIN_TOKEN || '').trim();
+  const header = request.headers.get('Authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (expected && bearer && timingSafeEqual(bearer, expected)) {
+    return { mode: 'token', username: '管理令牌' };
+  }
+
+  if (!getBlogOrigin(env)) return null;
+
+  const ownToken = readCookie(request, ADMIN_COOKIE);
+  if (ownToken) {
+    const who = await blogStatus(env, ownToken);
+    if (who) return { mode: 'blog', username: who.username };
+  }
+
+  const sharedToken = readCookie(request, BLOG_SESSION_COOKIE);
+  if (sharedToken && sharedToken !== ownToken) {
+    const who = await blogStatus(env, sharedToken);
+    if (who) return { mode: 'blog', username: who.username };
+  }
+
+  return null;
+}
+
+async function adminSession(request, env) {
+  if (!String(env.ADMIN_TOKEN || '').trim() && !getBlogOrigin(env)) {
+    throw new ApiError(404, '管理功能未开启');
+  }
+  const auth = await authenticateAdmin(request, env);
+  if (!auth) throw new ApiError(401, '请先登录');
+  return json({ ok: true, authed: true, mode: auth.mode, username: auth.username });
+}
+
+async function adminLogin(request, env) {
+  const origin = getBlogOrigin(env);
+  if (!origin) throw new ApiError(404, '没有配置简单博客登录');
+
+  const body = await readJson(request);
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  const totpCode = String(body.totpCode || body.code || '').trim();
+  if (!username || username.length > 128) throw new ApiError(400, '请输入简单博客用户名');
+  if (!password || password.length > 256) throw new ApiError(400, '请输入简单博客密码');
+  if (totpCode.length > 16) throw new ApiError(400, '验证码格式不正确');
+
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Origin: origin,
+    Referer: origin + '/admin',
+    'User-Agent': request.headers.get('User-Agent') || 'simple-link-admin'
+  };
+  const clientIp = request.headers.get('CF-Connecting-IP');
+  if (clientIp) headers['CF-Connecting-IP'] = clientIp;
+
+  let response;
+  try {
+    response = await fetch(origin + '/api/auth/login', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ username, password, totpCode }),
+      signal: AbortSignal.timeout(10000)
+    });
+  } catch {
+    throw new ApiError(502, '连接不上简单博客，请稍后再试');
+  }
+
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const message = data?.error || (response.status === 403
+      ? '简单博客拒绝了跨站登录，请检查 BLOG_ORIGIN 配置'
+      : '简单博客登录失败');
+    const extra = { 'Cache-Control': 'no-store' };
+    const retryAfter = response.headers.get('Retry-After');
+    if (retryAfter) extra['Retry-After'] = retryAfter;
+    return json({
+      ok: false,
+      error: message,
+      needTotp: Boolean(data?.needTotp)
+    }, response.status === 429 ? 429 : 401, extra);
+  }
+
+  const setCookie = response.headers.get('set-cookie') || '';
+  const match = setCookie.match(new RegExp(BLOG_SESSION_COOKIE + '=([^;,\\s]+)'));
+  if (!match) throw new ApiError(502, '简单博客没有返回登录会话');
+  let token = match[1];
+  try {
+    token = decodeURIComponent(token);
+  } catch {
+    /* 保持原值 */
+  }
+  if (!token || token.length > 256) throw new ApiError(502, '简单博客返回的登录会话无效');
+
+  return json({
+    ok: true,
+    authed: true,
+    mode: 'blog',
+    username: String(data?.username || username)
+  }, 200, { 'Set-Cookie': adminCookieHeader(request, token) });
+}
+
+async function adminLogout(request, env) {
+  const origin = getBlogOrigin(env);
+  const blogToken = readCookie(request, BLOG_SESSION_COOKIE) || readCookie(request, ADMIN_COOKIE);
+  if (origin && blogToken) {
+    try {
+      await fetch(origin + '/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          Origin: origin,
+          Cookie: BLOG_SESSION_COOKIE + '=' + encodeURIComponent(blogToken)
+        },
+        signal: AbortSignal.timeout(4000)
+      });
+    } catch {
+      /* 本地退出不因博客不可用而失败 */
+    }
+  }
+  return json({ ok: true }, 200, {
+    'Set-Cookie': [clearAdminCookieHeader(request), clearBlogCookieHeader(request, env)]
+  });
+}
+
+async function requireAdmin(request, env) {
+  if (!String(env.ADMIN_TOKEN || '').trim() && !getBlogOrigin(env)) {
+    throw new ApiError(404, '管理功能未开启');
+  }
+  const auth = await authenticateAdmin(request, env);
+  if (!auth) throw new ApiError(401, '请先登录');
+  return auth;
 }
 
 async function adminOverview(env, url) {

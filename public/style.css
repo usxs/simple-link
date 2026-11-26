@@ -293,6 +293,7 @@ textarea {
 
 .field {
   display: block;
+  min-width: 0;
 }
 
 .field + .field,
@@ -304,10 +305,12 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 18px;
   margin-bottom: 8px;
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
+  line-height: 18px;
 }
 
 .optional {
@@ -317,6 +320,7 @@ textarea {
 
 .input,
 .select {
+  display: block;
   width: 100%;
   height: 44px;
   padding: 0 13px;
@@ -347,6 +351,7 @@ textarea {
 .field-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 132px;
+  align-items: end;
   gap: 14px;
   margin-top: 18px;
 }
@@ -376,11 +381,13 @@ textarea {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 13px;
+  line-height: 42px;
   white-space: nowrap;
 }
 
 .input-wrap .input {
   height: 100%;
+  padding-left: 6px;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -391,6 +398,7 @@ textarea {
 }
 
 .select-wrap {
+  display: block;
   position: relative;
 }
 
@@ -1017,7 +1025,7 @@ textarea {
 }
 
 .admin-login {
-  max-width: 420px;
+  max-width: 460px;
   margin: 64px auto 0;
 }
 
@@ -1033,8 +1041,21 @@ textarea {
   font-size: 13px;
 }
 
+.admin-login #sso-btn {
+  margin-bottom: 24px;
+}
+
 .admin-login .form-hint {
   margin-top: 16px;
+}
+
+.login-switch {
+  margin-top: 14px;
+  text-align: center;
+}
+
+.login-switch .text-link {
+  font-size: 12px;
 }
 
 .admin-stats {
@@ -1269,6 +1290,11 @@ textarea {
 
   .admin-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-toolbar .input {
+    flex: 1;
+    max-width: none;
   }
 
   .admin-table .url-cell {

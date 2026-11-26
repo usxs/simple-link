@@ -1,8 +1,13 @@
 const TOKEN_KEY = 'simple-link:admin-token';
+const SSO_TRY_KEY = 'simple-link:sso-tried';
 const CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 const state = {
   token: '',
+  mode: '',
+  username: '',
+  config: null,
+  loginMethod: 'blog',
   timezone: 'Asia/Shanghai',
   query: '',
   links: []
@@ -26,26 +31,144 @@ function init() {
 
 async function bootstrap() {
   try {
-    const config = await api('/api/config');
-    state.timezone = config.timezone || 'Asia/Shanghai';
-    if (!config.adminEnabled) {
-      show('disabled');
-      return;
-    }
+    state.config = await api('/api/config');
+    state.timezone = state.config.timezone || 'Asia/Shanghai';
   } catch (error) {
     show('login');
     showLoginError('配置加载失败，请刷新页面重试。');
     return;
   }
 
+  if (!state.config.adminEnabled) {
+    show('disabled');
+    return;
+  }
+
+  if (!state.config.adminAuth?.blog) state.loginMethod = 'token';
+  configureLogin();
+
+  try {
+    const session = await getSession();
+    if (session) {
+      state.mode = session.mode || '';
+      state.username = session.username || '';
+      await loadOverview();
+      return;
+    }
+  } catch (error) {
+    if (error.status !== 401 && error.status !== 404) {
+      showLoginError(error.message || '登录状态检查失败，请稍后再试。');
+    }
+  }
+
   if (state.token) {
-    await loadOverview();
-  } else {
-    show('login');
+    try {
+      state.mode = 'token';
+      await loadOverview();
+      return;
+    } catch (error) {
+      clearStoredToken();
+      showLoginError(error.status === 401 ? '管理令牌不正确。' : error.message || '登录失败。');
+    }
+  }
+
+  if (shouldAutoSso()) {
+    goSso();
+    return;
+  }
+
+  showLogin();
+  if (new URLSearchParams(location.search).get('error') === 'sso') {
+    showLoginError('博客登录已过期，请重新登录。');
+  }
+}
+
+function ssoAvailable() {
+  return Boolean(state.config?.adminAuth?.sso && state.config.adminAuth.ssoUrl);
+}
+
+function shouldAutoSso() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('local') === '1' || params.get('error') === 'sso') return false;
+  if (!ssoAvailable()) return false;
+  try {
+    const last = Number(sessionStorage.getItem(SSO_TRY_KEY) || 0);
+    return !last || Date.now() - last > 5 * 60 * 1000;
+  } catch (error) {
+    return false;
+  }
+}
+
+function goSso() {
+  if (!ssoAvailable()) return;
+  try {
+    sessionStorage.setItem(SSO_TRY_KEY, String(Date.now()));
+  } catch (error) {
+    /* 忽略 */
+  }
+  location.replace(state.config.adminAuth.ssoUrl);
+}
+
+async function getSession() {
+  try {
+    return await api('/api/admin/session');
+  } catch (error) {
+    if (error.status === 401 || error.status === 404) return null;
+    throw error;
   }
 }
 
 function bindEvents() {
+  $('#blog-login-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    hideLoginError();
+    const username = $('#blog-username').value.trim();
+    const password = $('#blog-password').value;
+    const totpCode = $('#totp-code').value.trim();
+    if (!username) {
+      showLoginError('请输入简单博客用户名。');
+      $('#blog-username').focus();
+      return;
+    }
+    if (!password) {
+      showLoginError('请输入简单博客密码。');
+      $('#blog-password').focus();
+      return;
+    }
+
+    const button = $('#blog-login-btn');
+    button.disabled = true;
+    button.textContent = '验证中…';
+    try {
+      const data = await api('/api/admin/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password, totpCode })
+      });
+      state.mode = data.mode || 'blog';
+      state.username = data.username || username;
+      clearStoredToken();
+      state.token = '';
+      $('#blog-password').value = '';
+      $('#totp-code').value = '';
+      await loadOverview();
+    } catch (error) {
+      if (error.needTotp) {
+        $('#totp-field').hidden = false;
+        $('#totp-code').focus();
+        showLoginError('请输入两步验证码后继续。');
+      } else if (error.status === 401) {
+        showLoginError(error.message || '用户名或密码不正确。');
+      } else if (error.status === 429) {
+        showLoginError(error.message || '尝试次数过多，请稍后再试。');
+      } else {
+        showLoginError(error.message || '登录失败，请稍后再试。');
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = $('#totp-field').hidden ? '用博客密码登录' : '继续登录';
+    }
+  });
+
   $('#login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     hideLoginError();
@@ -54,11 +177,14 @@ function bindEvents() {
       showLoginError('请输入管理令牌。');
       return;
     }
-    state.token = token;
+
     const button = $('#login-btn');
     button.disabled = true;
     button.textContent = '验证中…';
+    state.token = token;
     try {
+      state.mode = 'token';
+      state.username = '管理令牌';
       await loadOverview();
       try {
         sessionStorage.setItem(TOKEN_KEY, token);
@@ -67,12 +193,22 @@ function bindEvents() {
       }
     } catch (error) {
       state.token = '';
+      state.mode = '';
       showLoginError(error.status === 401 ? '管理令牌不正确。' : error.message || '登录失败。');
     } finally {
       button.disabled = false;
       button.textContent = '进入后台';
     }
   });
+
+  $('#token-toggle').addEventListener('click', () => {
+    state.loginMethod = state.loginMethod === 'blog' ? 'token' : 'blog';
+    hideLoginError();
+    configureLogin();
+    focusLoginField();
+  });
+
+  $('#sso-btn').addEventListener('click', goSso);
 
   $('#refresh-btn').addEventListener('click', () => loadOverview());
   $('#logout-btn').addEventListener('click', logout);
@@ -85,22 +221,64 @@ function bindEvents() {
   });
 }
 
+function configureLogin() {
+  const blog = Boolean(state.config?.adminAuth?.blog);
+  const token = Boolean(state.config?.adminAuth?.token);
+  if (!blog) state.loginMethod = 'token';
+
+  const blogMode = blog && state.loginMethod === 'blog';
+  $('#blog-login-form').hidden = !blogMode;
+  $('#login-form').hidden = blogMode || !token;
+  $('#login-switch').hidden = !(blog && token);
+  $('#token-toggle').textContent = blogMode ? '使用管理令牌' : '返回简单博客登录';
+  $('#sso-btn').hidden = !ssoAvailable();
+
+  if (blog) {
+    $('#login-lead').textContent = '使用「简单博客」账号登录，登录状态会和博客共用。';
+    $('#login-hint').textContent = blogMode
+      ? '不需要单独注册。已经登录简单博客的话，打开本页会自动进入。'
+      : '管理令牌只保存在当前标签页，关闭标签页即失效。';
+  } else {
+    $('#login-lead').textContent = '输入部署时设置的管理令牌，查看全站短链、屏蔽或删除。';
+    $('#login-hint').textContent = '令牌只保存在当前标签页的 sessionStorage，关闭标签页即失效。';
+  }
+}
+
 function runSearch() {
   state.query = $('#search-input').value.trim();
   loadOverview();
 }
 
-function logout() {
+async function logout() {
+  const button = $('#logout-btn');
+  button.disabled = true;
+  try {
+    await api('/api/admin/logout', { method: 'POST' });
+  } catch (error) {
+    /* 服务端不可用时也要清掉本地状态 */
+  } finally {
+    button.disabled = false;
+  }
+
   state.token = '';
+  state.mode = '';
+  state.username = '';
   state.links = [];
+  clearStoredToken();
+  $('#token-input').value = '';
+  $('#blog-password').value = '';
+  $('#totp-code').value = '';
+  $('#totp-field').hidden = true;
+  $('#admin-rows').replaceChildren();
+  showLogin();
+}
+
+function clearStoredToken() {
   try {
     sessionStorage.removeItem(TOKEN_KEY);
   } catch (error) {
     /* 忽略 */
   }
-  $('#token-input').value = '';
-  $('#admin-rows').replaceChildren();
-  show('login');
 }
 
 async function api(path, options = {}) {
@@ -122,6 +300,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const failure = new Error(data?.error || '请求失败（' + response.status + '）');
     failure.status = response.status;
+    failure.needTotp = Boolean(data?.needTotp);
     throw failure;
   }
   return data;
@@ -139,13 +318,11 @@ async function loadOverview() {
   } catch (error) {
     if (error.status === 401) {
       state.token = '';
-      try {
-        sessionStorage.removeItem(TOKEN_KEY);
-      } catch (storageError) {
-        /* 忽略 */
-      }
-      show('login');
-      showLoginError('管理令牌已失效，请重新输入。');
+      state.mode = '';
+      state.username = '';
+      clearStoredToken();
+      showLogin();
+      showLoginError('登录状态已失效，请重新登录。');
       return;
     }
     throw error;
@@ -158,8 +335,12 @@ function renderOverview(data) {
   $('#stat-active').textContent = number(stats.activeLinks);
   $('#stat-clicks').textContent = number(stats.totalClicks);
   $('#stat-today').textContent = number(stats.todayClicks);
+
+  const who = state.mode === 'blog' && state.username
+    ? '已登录：' + state.username + ' · '
+    : '';
   $('#admin-meta').textContent =
-    '更新于 ' + formatDate(Date.now(), true) + ' · 时区 ' + data.timezone +
+    who + '更新于 ' + formatDate(Date.now(), true) + ' · 时区 ' + data.timezone +
     (state.query ? ' · 搜索“' + state.query + '”' : '');
   $('#admin-hint').textContent = state.query
     ? '搜索结果最多 40 条。删除不可恢复；屏蔽会立即停止跳转。'
@@ -275,6 +456,7 @@ async function act(code, action, label) {
     });
     await loadOverview();
   } catch (error) {
+    if (error.status === 401) return;
     showAdminError(error.message || '操作失败，请稍后再试。');
   }
 }
@@ -303,13 +485,24 @@ function hideLoginError() {
   box.textContent = '';
 }
 
+function showLogin() {
+  configureLogin();
+  show('login');
+  focusLoginField();
+}
+
+function focusLoginField() {
+  window.setTimeout(() => {
+    const blogMode = state.config?.adminAuth?.blog && state.loginMethod === 'blog';
+    const field = blogMode ? $('#blog-username') : $('#token-input');
+    if (field && !field.closest('[hidden]')) field.focus();
+  }, 0);
+}
+
 function show(view) {
   $('#login-view').hidden = view !== 'login';
   $('#dashboard').hidden = view !== 'dashboard';
   $('#disabled-view').hidden = view !== 'disabled';
-  if (view === 'login') {
-    window.setTimeout(() => $('#token-input').focus(), 0);
-  }
 }
 
 function number(value) {

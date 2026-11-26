@@ -1,5 +1,6 @@
 import { ApiError, htmlResponse, json, protect, redirect } from './http.js';
 import { handleApi } from './api.js';
+import { handleAdminSso, handleBlogSso } from './sso.js';
 import { renderErrorPage, renderStatsPage } from './pages.js';
 import { dayKey, safeHttpUrl } from './util.js';
 
@@ -37,6 +38,14 @@ export default {
 async function route(request, env, ctx, url) {
   const method = request.method.toUpperCase();
   const { pathname } = url;
+
+  if (pathname === '/__simple_link_sso') {
+    return handleBlogSso(request, env, url);
+  }
+
+  if (pathname === '/admin/sso') {
+    return handleAdminSso(request, env, url);
+  }
 
   if (pathname.startsWith('/api/')) {
     return handleApi(request, env, url);

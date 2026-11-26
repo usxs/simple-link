@@ -4,6 +4,8 @@
 
 界面和「简单博客」共用一套黑白设计：同一组颜色变量、同样的 Inter / JetBrains Mono 字体、同样的留白和边框。纯 HTML / CSS / JavaScript，没有前端框架和第三方统计脚本。
 
+在线实例：<https://s.wn.tn>。源码：<https://github.com/usxs/simple-link>。
+
 <p>
   <img src="docs/screenshots/home-light.png" width="49%" alt="简链首页浅色主题">
   <img src="docs/screenshots/home-dark.png" width="49%" alt="简链首页深色主题">
@@ -17,6 +19,7 @@
 - 每个短链生成一条管理密钥，凭密钥可提前删除；服务端只保存密钥哈希
 - `/<短码>+` 统计页：累计点击、最近 14 天柱状图、创建/到期/最近点击时间
 - 可选管理后台 `/admin`：查看全站短链、搜索、屏蔽、删除
+- 可选「简单博客」账号登录：博客已登录时自动单点登录；也保留管理令牌作为应急入口
 - 可选 Cloudflare Turnstile 人机验证，防止脚本刷额度
 - 自动 / 浅色 / 深色三档主题，跟随系统，选择记在 localStorage
 - 移动端适配、键盘可操作、减少动效偏好、CSP 与安全响应头
@@ -36,6 +39,7 @@ URL/
 │   ├── api.js        /api/*：生成、查询、删除、统计、管理
 │   ├── pages.js      统计页与错误页的服务端渲染
 │   ├── http.js       CSP、安全头、JSON / HTML 响应
+│   ├── sso.js        简单博客单点登录桥接、短时令牌、未登录页
 │   ├── validate.js   目标地址与短码校验、内网地址拦截
 │   └── util.js       时区、哈希、随机串、HTML 转义
 ├── public/           纯静态前端（HTML / CSS / 原生 JS）
@@ -57,6 +61,8 @@ URL/
 
 需要 Node.js 20+、pnpm、一个 Cloudflare 账号。以下命令都在 `URL/` 目录执行。
 
+仓库里的 `wrangler.jsonc` 已经填写线上实例的 D1 ID、自定义域名 `s.wn.tn` 和博客 SSO 路由。**自部署时请先换成自己的 D1、域名和博客地址**，否则会连到本项目使用的资源。
+
 ### 1. 安装依赖
 
 ```bash
@@ -70,7 +76,7 @@ pnpm exec wrangler login
 pnpm exec wrangler d1 create simple-link
 ```
 
-命令会输出 `database_id`。打开 `wrangler.jsonc`，把 `REPLACE_WITH_YOUR_D1_DATABASE_ID` 换成这一串 ID。
+命令会输出 `database_id`。打开 `wrangler.jsonc`，把 `database_id` 换成这一串 ID。
 
 ### 3. 建表
 
@@ -88,13 +94,33 @@ pnpm exec wrangler secret put IP_SALT
 
 `IP_SALT` 用来对访客 IP 做加盐哈希，请填一段足够长的随机字符串（例如 `openssl rand -hex 32` 的输出）。**上线后不要随意更换**，否则同一访客的历史额度和新额度会对不上。
 
-管理后台是可选的，开启需要再设置一个令牌：
+管理后台是可选的。最简单的方式是设置一个管理令牌：
 
 ```bash
 pnpm exec wrangler secret put ADMIN_TOKEN
 ```
 
-不设置 `ADMIN_TOKEN` 时，`/admin` 和 `/api/admin/*` 自动关闭。
+`ADMIN_TOKEN` 和 `BLOG_ORIGIN` 都不设置时，`/admin` 和 `/api/admin/*` 自动关闭；只设置其中一个也可以登录。
+
+如果要接入「简单博客」账号，再设置两项：
+
+```bash
+pnpm exec wrangler secret put BLOG_SSO_SECRET
+```
+
+`BLOG_SSO_SECRET` 填一段足够长的随机字符串（例如 `openssl rand -hex 32` 的输出），用于加密一次性的 SSO 跳转令牌，**不要和管理令牌或博客的密钥共用**。然后在 `wrangler.jsonc` 里把 `BLOG_ORIGIN` 改成博客 API 的源，例如 `https://api.starspace.cc`。
+
+博客的会话 Cookie（`console_session`）是 host-only 且 `SameSite=Strict`，短链域名读不到。因此需要在**博客 API 的域名**上把路径 `/__simple_link_sso` 路由到本 Worker，让浏览器带着博客 Cookie 访问这个地址，再由 Worker 调博客的 `/api/auth/status` 验证并跳回短链域名。`wrangler.jsonc` 中的示例：
+
+```jsonc
+"BLOG_ORIGIN": "https://api.starspace.cc",
+"routes": [
+  { "pattern": "s.wn.tn", "custom_domain": true },
+  { "pattern": "api.starspace.cc/__simple_link_sso", "zone_name": "starspace.cc" }
+]
+```
+
+如果博客 API 和短链在同一个域名，或你的部署工具没有 Workers Routes 权限，可以去掉第二条，改为在 Cloudflare 控制台手动添加同样的 Route。Route 生效需要几秒到几十秒，首次访问若短暂 404 可以稍后再试。
 
 ### 5. 按需调整公开配置
 
@@ -110,6 +136,8 @@ pnpm exec wrangler secret put ADMIN_TOKEN
 | `PUBLIC_ORIGIN` | 空 | 强制短链域名，例如 `https://s.example.com`；留空跟随访问域名 |
 | `TURNSTILE_SITE_KEY` | 空 | Turnstile 站点密钥；和 `TURNSTILE_SECRET` 同时存在才启用 |
 | `BLOCKED_HOSTS` | 空 | 禁止缩短的域名，逗号分隔，子域名一并拦截 |
+| `BLOG_ORIGIN` | 空 | 简单博客 API 的源，例如 `https://api.starspace.cc`；用于账号登录和 SSO |
+| `BLOG_COOKIE_DOMAIN` | 空 | 博客和简链共用可注册域名时，退出时顺便清除博客 Cookie，例如 `.wn.tn`；一般留空 |
 | `SIBLING_URL` | 空 | 页脚的「随机邮箱」入口 |
 | `BLOG_URL` | 空 | 页脚的「简单博客」入口 |
 | `REPO_URL` | 空 | 页脚的「源码」入口 |
@@ -129,6 +157,8 @@ pnpm deploy
 ```
 
 首次访问分配的 `*.workers.dev` 域名即可使用。定时清理任务会随部署自动注册，UTC 03:41（北京时间 11:41）执行。
+
+如果使用仓库里现成的 `routes`，部署时还需要有 Workers Routes 权限；只有 Worker 上传权限时，脚本会部署成功，但路由会报 `No access to the specified resource`。这时可以用有 DNS / Routes 权限的令牌在控制台或 API 里补上 `s.wn.tn` 和 `api.starspace.cc/__simple_link_sso` 两条路由，不影响已经上传的 Worker。
 
 ### 7. 绑定自定义域名（可选）
 
@@ -174,16 +204,23 @@ pnpm tail               # 实时日志
 
 ## 管理后台
 
-访问 `/admin`，输入部署时设置的 `ADMIN_TOKEN`。令牌只保存在当前标签页的 `sessionStorage`，关闭标签页即失效。
+访问 `/admin`。配置了 `BLOG_ORIGIN` 和 `BLOG_SSO_SECRET` 时，页面会先尝试用「简单博客」的登录状态自动登录：
+
+- 博客已经登录：自动跳转、验证、回到简链后台，不需要再输密码。
+- 博客没有登录：显示「还差一步」，可以去博客后台登录，也可以点「使用管理令牌登录」回到 `/admin?local=1`。
+- 也可以在登录页直接用博客用户名和密码登录；开启了两步验证时会继续要求 TOTP。
+- 管理令牌登录仍然保留，令牌只存在当前标签页的 `sessionStorage`，关闭标签页即失效。
 
 后台可以查看全站短链、按短码或目标地址搜索、屏蔽（立即返回 451）、解除屏蔽、删除。删除不可恢复。
 
-如果公开部署，建议同时开启 Turnstile 并设置一个足够长的 `ADMIN_TOKEN`。后台页面已在 `robots.txt` 中禁止抓取，但这不能替代访问控制。
+登录成功后简链会设置一个 `HttpOnly`、`SameSite=Lax` 的 `sl_admin` Cookie，默认 7 天有效；它只用于简链后台，不会读写博客的其他数据。退出时会尽力清除简链 Cookie；博客自己的会话是否退出由博客控制。
+
+如果公开部署，建议同时开启 Turnstile，并设置足够长的 `ADMIN_TOKEN` / `BLOG_SSO_SECRET`。后台页面已在 `robots.txt` 中禁止抓取，但这不能替代访问控制。
 
 ## 隐私与边界
 
 - 只记录短链、目标地址、创建时间、到期时间、点击次数、按天点击数、创建者 IP 的加盐哈希、管理密钥哈希。
-- 不记录原始 IP、User-Agent、Referer，不写 Cookie，不接第三方统计。
+- 不记录原始 IP、User-Agent、Referer，不接第三方统计。公开页面不写 Cookie；只有登录后台成功后才设置一个用于后台会话的 `sl_admin` Cookie。
 - 点击计数按天汇总；统计页展示最近 14 天，不提供访客明细。
 - 只接受 `http` / `https` 目标；拒绝内网、本机、云元数据地址和带账号密码的 URL；拒绝把短链指向自己。
 - 短码是公开的，任何拿到链接的人都能访问。请不要用它缩短隐私内容或一次性凭证。
@@ -221,7 +258,7 @@ pnpm tail               # 实时日志
 | 短链统计 | `docs/screenshots/stats-light.png` |
 | 管理后台 | `docs/screenshots/admin-light.png` |
 
-截图来自本地 `wrangler dev`，所以地址栏和结果里是 `127.0.0.1`。部署后会自动换成你的域名。
+截图来自本地 `wrangler dev`，所以地址栏和结果里是 `127.0.0.1`。线上实例会自动换成 `s.wn.tn`。
 
 ## 许可
 

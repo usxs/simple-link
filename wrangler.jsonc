@@ -31,7 +31,9 @@
 
   // 短链服务使用 s.wn.tn 子域，避免影响 wn.tn 现有站点
   "routes": [
-    { "pattern": "s.wn.tn", "custom_domain": true }
+    { "pattern": "s.wn.tn", "custom_domain": true },
+    // 仅接管博客域名的 /__simple_link_sso 单点登录入口；其他路径仍走博客源站
+    { "pattern": "api.starspace.cc/__simple_link_sso", "zone_name": "starspace.cc" }
   ],
 
   "vars": {
@@ -51,8 +53,16 @@
 
     // 可选：站点与友链。留空则不显示对应入口
     "SIBLING_URL": "https://mail.wn.tn",
-    "BLOG_URL": "",
-    "REPO_URL": ""
+    "BLOG_URL": "https://www.starspace.cc",
+    "REPO_URL": "https://github.com/usxs/simple-link",
+
+    // 可选：接入「简单博客」账号登录。填写博客的根地址，例如 https://blog.example.com
+    // 留空时只使用 ADMIN_TOKEN 登录。
+    "BLOG_ORIGIN": "https://api.starspace.cc",
+
+    // 可选：博客登录 Cookie 所在的父域，例如 .wn.tn。
+    // 只有博客和简链在同一个可注册域名下时才需要，用来退出时清除共享 Cookie。
+    "BLOG_COOKIE_DOMAIN": ""
   }
 
   // 自定义域名示例（按需取消注释并改成自己的域名）：
