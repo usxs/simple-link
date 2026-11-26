@@ -1,7 +1,5 @@
 import { escapeHtml } from './util.js';
 
-const FONT_URL =
-  'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600&display=swap';
 const DAY_MS = 86400000;
 
 const ICONS = {
@@ -57,11 +55,8 @@ ${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
 <meta name="theme-color" content="#F7F7F8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#101012" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<script src="/theme.js"></script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="${FONT_URL}" rel="stylesheet">
-<link rel="stylesheet" href="/style.css">
+<script src="/theme.js?v=5"></script>
+<link rel="stylesheet" href="/style.css?v=5">
 </head>
 <body class="narrow">
 ${header()}

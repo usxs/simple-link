@@ -19,6 +19,12 @@ const ASSET_PATHS = new Set([
   '/favicon-192.png',
   '/favicon-512.png',
   '/apple-touch-icon.png',
+  '/favicon-dark.svg',
+  '/favicon-light.svg',
+  '/favicon-32-dark.png',
+  '/favicon-192-dark.png',
+  '/favicon-512-dark.png',
+  '/apple-touch-icon-dark.png',
   '/robots.txt',
   '/manifest.webmanifest'
 ]);

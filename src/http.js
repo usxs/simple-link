@@ -5,8 +5,8 @@ const CSP = [
   "frame-ancestors 'none'",
   "object-src 'none'",
   "img-src 'self' data:",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src https://fonts.gstatic.com",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
   "script-src 'self' https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "connect-src 'self' https://challenges.cloudflare.com"

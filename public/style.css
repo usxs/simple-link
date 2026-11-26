@@ -14,8 +14,8 @@
   --shadow-sm: 0 1px 2px rgba(20, 20, 22, 0.05);
   --radius: 8px;
   --radius-lg: 12px;
-  --font-sans: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light;
 }
 
@@ -126,9 +126,13 @@ textarea {
   height: 32px;
   display: block;
   flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
 }
 
-.brand-mark img {
+.brand-mark img,
+.brand-mark svg {
   display: block;
   width: 100%;
   height: 100%;

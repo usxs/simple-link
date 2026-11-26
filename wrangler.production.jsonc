@@ -39,7 +39,7 @@
     "ACTIVE_LINK_LIMIT": "30",
     "DEFAULT_TTL_DAYS": "365",
     "MAX_TTL_DAYS": "365",
-    "TURNSTILE_SITE_KEY": "",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAGUEgulrgwjkpv4w",
     "PUBLIC_ORIGIN": "https://s.wn.tn",
     "BLOCKED_HOSTS": "",
     "SIBLING_URL": "https://mail.wn.tn",
