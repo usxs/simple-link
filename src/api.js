@@ -9,13 +9,37 @@ import {
   sha256Hex,
   timingSafeEqual
 } from './util.js';
+import {
+  authenticateAdmin,
+  base64url,
+  clearAdminCookieHeader,
+  clearOwnerCookieHeader,
+  clearPkCookieHeader,
+  destroyAdminSession,
+  getAuthConfig,
+  getBlogOrigin,
+  loginWithBlog,
+  loginWithPasskey,
+  loginWithPassword,
+  makeChallengeCookie,
+  ownerContext,
+  ownerCookieHeader,
+  ownerHashFromKey,
+  readChallengeCookie,
+  ssoEnabled
+} from './auth.js';
+import {
+  originFor,
+  rpIdFor,
+  verifyAssertion,
+  verifyRegistration
+} from './passkeys.js';
 import { normalizeDestination, validateSlug } from './validate.js';
 
 const CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const DAY_MS = 86400000;
-const ADMIN_COOKIE = 'sl_admin';
-const BLOG_SESSION_COOKIE = 'console_session';
-const ADMIN_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
+const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_MAX_FAILURES = 10;
 
 export async function handleApi(request, env, url) {
   const segments = url.pathname.split('/').filter(Boolean);
@@ -52,26 +76,42 @@ export async function handleApi(request, env, url) {
     }
   }
 
-  if (route === 'admin' && segments[2] === 'session' && readOnly) {
-    return adminSession(request, env);
+  if (route === 'manage') {
+    if (segments[2] === 'session' && method === 'POST') {
+      return manageLogin(request, env);
+    }
+    if (segments[2] === 'logout' && method === 'POST') {
+      return manageLogout(request);
+    }
+    if (segments[2] === 'links' && segments.length === 3 && readOnly) {
+      return manageLinks(request, env, url);
+    }
+    if (segments[2] === 'links' && segments.length === 4 && method === 'POST') {
+      return manageAction(request, env, segments[3]);
+    }
   }
 
-  if (route === 'admin' && segments[2] === 'login' && method === 'POST') {
-    return adminLogin(request, env);
-  }
-
-  if (route === 'admin' && segments[2] === 'logout' && method === 'POST') {
-    return adminLogout(request, env);
-  }
-
-  if (route === 'admin' && segments[2] === 'overview' && readOnly) {
-    await requireAdmin(request, env);
-    return adminOverview(env, url);
-  }
-
-  if (route === 'admin' && segments[2] === 'links' && segments.length === 4 && method === 'POST') {
-    await requireAdmin(request, env);
-    return adminAction(request, env, segments[3]);
+  if (route === 'admin') {
+    if (segments[2] === 'session' && readOnly) {
+      return adminSession(request, env);
+    }
+    if (segments[2] === 'login' && method === 'POST') {
+      return adminLogin(request, env);
+    }
+    if (segments[2] === 'logout' && method === 'POST') {
+      return adminLogout(request, env);
+    }
+    if (segments[2] === 'overview' && readOnly) {
+      await requireAdmin(request, env);
+      return adminOverview(env, url);
+    }
+    if (segments[2] === 'links' && segments.length === 4 && method === 'POST') {
+      await requireAdmin(request, env);
+      return adminAction(request, env, segments[3]);
+    }
+    if (segments[2] === 'passkeys') {
+      return handlePasskeysRoute(request, env, url, segments, method, readOnly);
+    }
   }
 
   throw new ApiError(404, '接口不存在');
@@ -140,14 +180,17 @@ async function getQuota(env, ipHash) {
   });
 }
 
-function getConfig(env, url) {
+async function getConfig(env, url) {
   const limits = readLimits(env);
   const turnstileSiteKey = String(env.TURNSTILE_SITE_KEY || '').trim();
   const turnstileSecret = String(env.TURNSTILE_SECRET || '').trim();
-  const adminToken = Boolean(String(env.ADMIN_TOKEN || '').trim());
-  const blogOrigin = getBlogOrigin(env);
-  const ssoOrigin = safeHttpUrl(env.BLOG_SSO_ORIGIN) || blogOrigin;
-  const sso = Boolean(blogOrigin && ssoOrigin && String(env.BLOG_SSO_SECRET || '').trim());
+  const auth = await getAuthConfig(env);
+  const ssoOrigin = safeHttpUrl(env.BLOG_SSO_ORIGIN) || getBlogOrigin(env);
+  const methods = [];
+  if (auth.password) methods.push('password');
+  if (auth.token) methods.push('token');
+  if (auth.passkey) methods.push('passkey');
+  if (auth.sso) methods.push('blog');
   return json({
     ok: true,
     brand: '简链',
@@ -157,14 +200,18 @@ function getConfig(env, url) {
     limits,
     ttlOptions: ttlOptions(limits),
     turnstileSiteKey: turnstileSiteKey && turnstileSecret ? turnstileSiteKey : null,
-    adminEnabled: adminToken || Boolean(blogOrigin),
+    adminEnabled: auth.enabled,
     adminAuth: {
-      blog: Boolean(blogOrigin),
-      blogOrigin,
-      token: adminToken,
-      auto: Boolean(blogOrigin),
-      sso,
-      ssoUrl: sso ? new URL(ssoOrigin).origin + '/__simple_link_sso' : ''
+      password: auth.password,
+      token: auth.token,
+      passkey: auth.passkey,
+      passkeyCount: auth.passkeyCount,
+      blog: auth.sso,
+      sso: auth.sso,
+      auto: false,
+      ssoUrl: auth.sso && ssoOrigin ? new URL(ssoOrigin).origin + '/__simple_link_sso' : '',
+      methods,
+      defaultMethod: methods[0] || ''
     },
     links: {
       sibling: safeHttpUrl(env.SIBLING_URL),
@@ -185,7 +232,7 @@ async function readJson(request) {
   } catch {
     throw new ApiError(400, '读取请求内容失败');
   }
-  if (text.length > 16384) throw new ApiError(413, '请求内容过大');
+  if (text.length > 32768) throw new ApiError(413, '请求内容过大');
   if (!text.trim()) throw new ApiError(400, '请求内容为空');
   let body;
   try {
@@ -224,7 +271,9 @@ async function verifyTurnstile(request, env, token) {
 
   const result = await response.json().catch(() => null);
   if (!result || !result.success) throw new ApiError(400, '人机验证未通过，请刷新后重试');
-  if (result.action && result.action !== 'shorten') {
+  // Cloudflare 的公开测试密钥不会返回 action；仅测试模式放行，生产密钥不会出现该标记。
+  const testToken = Boolean(result.metadata && result.metadata.result_with_testing_key);
+  if (!testToken && result.action !== 'shorten') {
     throw new ApiError(400, '人机验证无效，请刷新后重试');
   }
 }
@@ -272,6 +321,11 @@ async function createLink(request, env, url, ipHash) {
   const now = Date.now();
   const day = dayKey(tz, now);
 
+  const owner = await ownerContext(request);
+  const ownerKey = owner?.key || randomToken(24);
+  const newlyIssuedOwner = !owner;
+  const ownerHash = owner?.hash || (await ownerHashFromKey(ownerKey));
+
   if (customSlug) {
     const existing = await env.DB.prepare('SELECT 1 AS hit FROM links WHERE code = ?1')
       .bind(customSlug)
@@ -286,20 +340,19 @@ async function createLink(request, env, url, ipHash) {
     .first();
   const activeUsed = activeRow?.n || 0;
   if (activeUsed >= limits.active) {
-    throw new ApiError(429, `你最多同时保留 ${limits.active} 条有效短链，请等旧链接到期后再来`);
+    throw new ApiError(429, '你最多同时保留 ' + limits.active + ' 条有效短链，请等旧链接到期后再来');
   }
 
   const reserved = await env.DB.prepare(
-    `INSERT INTO link_quota (ip_hash, day, count) VALUES (?1, ?2, 1)
-     ON CONFLICT(ip_hash, day) DO UPDATE SET count = count + 1
-     WHERE count < ?3
-     RETURNING count`
+    'INSERT INTO link_quota (ip_hash, day, count) VALUES (?1, ?2, 1) ' +
+      'ON CONFLICT(ip_hash, day) DO UPDATE SET count = count + 1 ' +
+      'WHERE count < ?3 RETURNING count'
   )
     .bind(ipHash, day, limits.daily)
     .first();
 
   if (!reserved) {
-    throw new ApiError(429, `今天的 ${limits.daily} 条额度已经用完了，明天再来吧`);
+    throw new ApiError(429, '今天的 ' + limits.daily + ' 条额度已经用完了，明天再来吧');
   }
 
   const expiresAt = now + ttlDays * DAY_MS;
@@ -314,11 +367,11 @@ async function createLink(request, env, url, ipHash) {
       if (!customSlug) code = randomCode(7);
       try {
         await env.DB.prepare(
-          `INSERT INTO links
-            (code, url, created_at, created_day, expires_at, clicks, last_click_at, blocked, ip_hash, manage_hash)
-           VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, 0, ?6, ?7)`
+          'INSERT INTO links ' +
+            '(code, url, created_at, created_day, expires_at, clicks, last_click_at, blocked, ip_hash, manage_hash, owner_hash) ' +
+            'VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, 0, ?6, ?7, ?8)'
         )
-          .bind(code, destination, now, day, expiresAt, ipHash, manageHash)
+          .bind(code, destination, now, day, expiresAt, ipHash, manageHash, ownerHash)
           .run();
         inserted = true;
         break;
@@ -345,23 +398,25 @@ async function createLink(request, env, url, ipHash) {
   }
 
   const dailyUsed = reserved.count || 0;
-  return json(
-    {
-      ok: true,
-      link: {
-        code,
-        url: destination,
-        shortUrl: `${publicOrigin}/${code}`,
-        statsUrl: `${publicOrigin}/${code}+`,
-        createdAt: now,
-        expiresAt,
-        ttlDays
-      },
-      manageKey,
-      quota: quotaPayload(dailyUsed, activeUsed + 1, limits)
+  const result = {
+    ok: true,
+    link: {
+      code,
+      url: destination,
+      shortUrl: publicOrigin + '/' + code,
+      statsUrl: publicOrigin + '/' + code + '+',
+      createdAt: now,
+      expiresAt,
+      ttlDays
     },
-    201
-  );
+    manageKey,
+    quota: quotaPayload(dailyUsed, activeUsed + 1, limits)
+  };
+  if (newlyIssuedOwner) result.ownerKey = ownerKey;
+
+  return json(result, 201, {
+    'Set-Cookie': ownerCookieHeader(request, ownerKey)
+  });
 }
 
 async function lookupLinks(request, env, url) {
@@ -374,10 +429,10 @@ async function lookupLinks(request, env, url) {
   ];
   if (codes.length === 0) return json({ ok: true, items: [] });
 
-  const placeholders = codes.map((_, index) => `?${index + 1}`).join(', ');
+  const placeholders = codes.map((_, index) => '?' + (index + 1)).join(', ');
   const rows = await env.DB.prepare(
-    `SELECT code, url, created_at, expires_at, clicks, last_click_at, blocked
-     FROM links WHERE code IN (${placeholders})`
+    'SELECT code, url, created_at, expires_at, clicks, last_click_at, blocked ' +
+      'FROM links WHERE code IN (' + placeholders + ')'
   )
     .bind(...codes)
     .all();
@@ -394,8 +449,8 @@ async function lookupLinks(request, env, url) {
         code,
         exists: true,
         url: row.url,
-        shortUrl: `${publicOrigin}/${code}`,
-        statsUrl: `${publicOrigin}/${code}+`,
+        shortUrl: publicOrigin + '/' + code,
+        statsUrl: publicOrigin + '/' + code + '+',
         clicks: row.clicks,
         createdAt: row.created_at,
         expiresAt: row.expires_at,
@@ -422,11 +477,15 @@ async function deleteLink(request, env, code) {
     throw new ApiError(403, '管理密钥不正确');
   }
 
+  await removeLink(env, code);
+  return json({ ok: true, code });
+}
+
+async function removeLink(env, code) {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM link_clicks_daily WHERE code = ?1').bind(code),
     env.DB.prepare('DELETE FROM links WHERE code = ?1').bind(code)
   ]);
-  return json({ ok: true, code });
 }
 
 async function getStats(env, code, url) {
@@ -457,235 +516,381 @@ async function getStats(env, code, url) {
       ...row,
       blocked: Boolean(row.blocked),
       status: row.blocked ? 'blocked' : row.expires_at <= now ? 'expired' : 'active',
-      shortUrl: `${getPublicOrigin(env, url)}/${row.code}`
+      shortUrl: getPublicOrigin(env, url) + '/' + row.code
     },
     timezone: tz,
     daily: days.map((day) => ({ day, count: counts.get(day) || 0 }))
   });
 }
 
-function getBlogOrigin(env) {
-  const raw = safeHttpUrl(env.BLOG_ORIGIN);
-  return raw ? new URL(raw).origin : '';
-}
-
-function readCookie(request, name) {
-  const header = request.headers.get('Cookie') || '';
-  for (const part of header.split(';')) {
-    const index = part.indexOf('=');
-    if (index < 0) continue;
-    if (part.slice(0, index).trim() !== name) continue;
-    const value = part.slice(index + 1).trim();
-    try {
-      return decodeURIComponent(value);
-    } catch {
-      return '';
-    }
+async function manageLogin(request, env) {
+  const body = await readJson(request);
+  const key = String(body.key || body.ownerKey || '').trim();
+  if (!/^[A-Za-z0-9_-]{24,128}$/.test(key)) {
+    throw new ApiError(400, '管理密钥格式不正确');
   }
-  return '';
+  const hash = await ownerHashFromKey(key);
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM links WHERE owner_hash = ?1'
+  )
+    .bind(hash)
+    .first();
+  if (!row?.n) throw new ApiError(401, '没有找到这个管理密钥对应的短链');
+
+  return json(
+    { ok: true, authed: true, count: row.n },
+    200,
+    { 'Set-Cookie': ownerCookieHeader(request, key) }
+  );
 }
 
-function cookieSecure(request) {
-  try {
-    return new URL(request.url).protocol === 'https:';
-  } catch {
-    return true;
-  }
+async function manageLogout(request) {
+  return json({ ok: true }, 200, { 'Set-Cookie': clearOwnerCookieHeader(request) });
 }
 
-function adminCookieHeader(request, token) {
-  const secure = cookieSecure(request) ? '; Secure' : '';
-  return ADMIN_COOKIE + '=' + encodeURIComponent(token) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + ADMIN_COOKIE_MAX_AGE + secure;
+async function manageLinks(request, env, url) {
+  const owner = await ownerContext(request);
+  if (!owner) throw new ApiError(401, '请先输入管理密钥');
+  const rows = await env.DB.prepare(
+    'SELECT code, url, created_at, expires_at, clicks, last_click_at, blocked ' +
+      'FROM links WHERE owner_hash = ?1 ORDER BY created_at DESC LIMIT 100'
+  )
+    .bind(owner.hash)
+    .all();
+  const links = rows.results || [];
+  const now = Date.now();
+  const totalClicks = links.reduce((sum, row) => sum + Number(row.clicks || 0), 0);
+  const active = links.filter((row) => !row.blocked && row.expires_at > now).length;
+  return json({
+    ok: true,
+    origin: getPublicOrigin(env, url),
+    stats: {
+      total: links.length,
+      active,
+      clicks: totalClicks
+    },
+    links
+  });
 }
 
-function blogCookieDomain(env) {
-  const raw = String(env.BLOG_COOKIE_DOMAIN || '').trim().toLowerCase();
-  if (!/^[a-z0-9.-]+$/.test(raw)) return '';
-  return raw.startsWith('.') ? raw : '.' + raw;
-}
+async function manageAction(request, env, code) {
+  if (!CODE_RE.test(code)) throw new ApiError(404, '短链不存在');
+  const owner = await ownerContext(request);
+  if (!owner) throw new ApiError(401, '请先输入管理密钥');
+  const body = await readJson(request);
+  const action = String(body.action || '');
+  if (!['delete', 'block', 'unblock'].includes(action)) throw new ApiError(400, '未知操作');
 
-function clearAdminCookieHeader(request) {
-  const secure = cookieSecure(request) ? '; Secure' : '';
-  return ADMIN_COOKIE + '=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' + secure;
-}
-
-function clearBlogCookieHeader(request, env) {
-  const secure = cookieSecure(request) ? '; Secure' : '';
-  const domain = blogCookieDomain(env);
-  const domainPart = domain ? '; Domain=' + domain : '';
-  return BLOG_SESSION_COOKIE + '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' + domainPart + secure;
-}
-
-async function blogStatus(env, token) {
-  const origin = getBlogOrigin(env);
-  if (!origin || !token || token.length > 256) return null;
-  try {
-    const response = await fetch(origin + '/api/auth/status', {
-      headers: {
-        Accept: 'application/json',
-        Cookie: BLOG_SESSION_COOKIE + '=' + encodeURIComponent(token)
-      },
-      signal: AbortSignal.timeout(5000)
-    });
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data || data.ok !== true || data.authed !== true) return null;
-    return { username: String(data.username || '') };
-  } catch {
-    return null;
-  }
-}
-
-async function authenticateAdmin(request, env) {
-  const expected = String(env.ADMIN_TOKEN || '').trim();
-  const header = request.headers.get('Authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  if (expected && bearer && timingSafeEqual(bearer, expected)) {
-    return { mode: 'token', username: '管理令牌' };
+  const row = await env.DB.prepare(
+    'SELECT code, owner_hash FROM links WHERE code = ?1'
+  )
+    .bind(code)
+    .first();
+  if (!row) throw new ApiError(404, '短链不存在');
+  if (!timingSafeEqual(String(row.owner_hash || ''), owner.hash)) {
+    throw new ApiError(403, '这条短链不属于当前管理密钥');
   }
 
-  if (!getBlogOrigin(env)) return null;
-
-  const ownToken = readCookie(request, ADMIN_COOKIE);
-  if (ownToken) {
-    const who = await blogStatus(env, ownToken);
-    if (who) return { mode: 'blog', username: who.username };
+  if (action === 'delete') {
+    await removeLink(env, code);
+    return json({ ok: true, code, action });
   }
+  await env.DB.prepare('UPDATE links SET blocked = ?1 WHERE code = ?2')
+    .bind(action === 'block' ? 1 : 0, code)
+    .run();
+  return json({ ok: true, code, action });
+}
 
-  const sharedToken = readCookie(request, BLOG_SESSION_COOKIE);
-  if (sharedToken && sharedToken !== ownToken) {
-    const who = await blogStatus(env, sharedToken);
-    if (who) return { mode: 'blog', username: who.username };
-  }
+async function adminRateLimited(request, env) {
+  const ipHash = await getIpHash(request, env);
+  const since = Date.now() - ADMIN_LOGIN_WINDOW_MS;
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM admin_login_attempts WHERE ip_hash = ?1 AND ts >= ?2'
+  )
+    .bind(ipHash, since)
+    .first();
+  return { ipHash, limited: Number(row?.n || 0) >= ADMIN_LOGIN_MAX_FAILURES };
+}
 
-  return null;
+async function recordAdminFailure(env, ipHash) {
+  await env.DB.prepare('INSERT INTO admin_login_attempts (ip_hash, ts) VALUES (?1, ?2)')
+    .bind(ipHash, Date.now())
+    .run();
+}
+
+async function clearAdminFailures(env, ipHash) {
+  await env.DB.prepare('DELETE FROM admin_login_attempts WHERE ip_hash = ?1')
+    .bind(ipHash)
+    .run();
 }
 
 async function adminSession(request, env) {
-  if (!String(env.ADMIN_TOKEN || '').trim() && !getBlogOrigin(env)) {
-    throw new ApiError(404, '管理功能未开启');
-  }
   const auth = await authenticateAdmin(request, env);
   if (!auth) throw new ApiError(401, '请先登录');
-  return json({ ok: true, authed: true, mode: auth.mode, username: auth.username });
+  const config = await getAuthConfig(env);
+  return json({
+    ok: true,
+    authed: true,
+    mode: auth.mode,
+    username: auth.username,
+    passkey: config.passkey,
+    password: config.password,
+    token: config.token,
+    sso: config.sso
+  });
 }
 
 async function adminLogin(request, env) {
-  const origin = getBlogOrigin(env);
-  if (!origin) throw new ApiError(404, '没有配置简单博客登录');
+  const config = await getAuthConfig(env);
+  if (!config.password) throw new ApiError(404, '没有配置管理员账密');
+
+  const rate = await adminRateLimited(request, env);
+  if (rate.limited) throw new ApiError(429, '尝试次数过多，请 15 分钟后再试');
 
   const body = await readJson(request);
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
-  const totpCode = String(body.totpCode || body.code || '').trim();
-  if (!username || username.length > 128) throw new ApiError(400, '请输入简单博客用户名');
-  if (!password || password.length > 256) throw new ApiError(400, '请输入简单博客密码');
-  if (totpCode.length > 16) throw new ApiError(400, '验证码格式不正确');
+  if (!username || username.length > 128) throw new ApiError(400, '请输入管理员用户名');
+  if (!password || password.length > 256) throw new ApiError(400, '请输入管理员密码');
 
-  const headers = {
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Origin: origin,
-    Referer: origin + '/admin',
-    'User-Agent': request.headers.get('User-Agent') || 'simple-link-admin'
-  };
-  const clientIp = request.headers.get('CF-Connecting-IP');
-  if (clientIp) headers['CF-Connecting-IP'] = clientIp;
-
-  let response;
-  try {
-    response = await fetch(origin + '/api/auth/login', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ username, password, totpCode }),
-      signal: AbortSignal.timeout(10000)
-    });
-  } catch {
-    throw new ApiError(502, '连接不上简单博客，请稍后再试');
+  const result = await loginWithPassword(request, env, username, password);
+  if (!result) {
+    await recordAdminFailure(env, rate.ipHash);
+    throw new ApiError(401, '用户名或密码不正确');
   }
-
-  let data = null;
-  try {
-    data = await response.json();
-  } catch {
-    data = null;
-  }
-
-  if (!response.ok) {
-    const message = data?.error || (response.status === 403
-      ? '简单博客拒绝了跨站登录，请检查 BLOG_ORIGIN 配置'
-      : '简单博客登录失败');
-    const extra = { 'Cache-Control': 'no-store' };
-    const retryAfter = response.headers.get('Retry-After');
-    if (retryAfter) extra['Retry-After'] = retryAfter;
-    return json({
-      ok: false,
-      error: message,
-      needTotp: Boolean(data?.needTotp)
-    }, response.status === 429 ? 429 : 401, extra);
-  }
-
-  const setCookie = response.headers.get('set-cookie') || '';
-  const match = setCookie.match(new RegExp(BLOG_SESSION_COOKIE + '=([^;,\\s]+)'));
-  if (!match) throw new ApiError(502, '简单博客没有返回登录会话');
-  let token = match[1];
-  try {
-    token = decodeURIComponent(token);
-  } catch {
-    /* 保持原值 */
-  }
-  if (!token || token.length > 256) throw new ApiError(502, '简单博客返回的登录会话无效');
-
-  return json({
-    ok: true,
-    authed: true,
-    mode: 'blog',
-    username: String(data?.username || username)
-  }, 200, { 'Set-Cookie': adminCookieHeader(request, token) });
+  await clearAdminFailures(env, rate.ipHash);
+  return json(
+    { ok: true, authed: true, mode: result.session.mode, username: result.session.username },
+    200,
+    { 'Set-Cookie': result.cookie }
+  );
 }
 
 async function adminLogout(request, env) {
-  const origin = getBlogOrigin(env);
-  const blogToken = readCookie(request, BLOG_SESSION_COOKIE) || readCookie(request, ADMIN_COOKIE);
-  if (origin && blogToken) {
-    try {
-      await fetch(origin + '/api/auth/logout', {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          Origin: origin,
-          Cookie: BLOG_SESSION_COOKIE + '=' + encodeURIComponent(blogToken)
-        },
-        signal: AbortSignal.timeout(4000)
-      });
-    } catch {
-      /* 本地退出不因博客不可用而失败 */
+  const cookie = await destroyAdminSession(request, env);
+  const headers = { 'Set-Cookie': [cookie] };
+  if (ssoEnabled(env)) {
+    const origin = getBlogOrigin(env);
+    if (origin) {
+      headers['Set-Cookie'].push(
+        'console_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+      );
     }
   }
-  return json({ ok: true }, 200, {
-    'Set-Cookie': [clearAdminCookieHeader(request), clearBlogCookieHeader(request, env)]
-  });
+  return json({ ok: true }, 200, headers);
 }
 
 async function requireAdmin(request, env) {
-  if (!String(env.ADMIN_TOKEN || '').trim() && !getBlogOrigin(env)) {
-    throw new ApiError(404, '管理功能未开启');
-  }
   const auth = await authenticateAdmin(request, env);
   if (!auth) throw new ApiError(401, '请先登录');
   return auth;
+}
+
+async function handlePasskeysRoute(request, env, url, segments, method, readOnly) {
+  if (segments.length === 3 && readOnly) {
+    await requireAdmin(request, env);
+    return listPasskeys(env);
+  }
+
+  if (segments[3] === 'register' && segments[4] === 'options' && method === 'POST') {
+    await requireAdmin(request, env);
+    return passkeyRegisterOptions(request, env);
+  }
+
+  if (segments[3] === 'register' && segments.length === 4 && method === 'POST') {
+    await requireAdmin(request, env);
+    return passkeyRegisterFinish(request, env);
+  }
+
+  if (segments[3] === 'login' && segments[4] === 'options' && method === 'POST') {
+    return passkeyLoginOptions(request, env);
+  }
+
+  if (segments[3] === 'login' && segments.length === 4 && method === 'POST') {
+    return passkeyLoginFinish(request, env);
+  }
+
+  if (segments.length === 4 && method === 'DELETE') {
+    await requireAdmin(request, env);
+    return deletePasskey(env, segments[3]);
+  }
+
+  throw new ApiError(404, '接口不存在');
+}
+
+async function listPasskeys(env) {
+  const rows = await env.DB.prepare(
+    'SELECT id, name, created_at, last_used_at FROM admin_passkeys ORDER BY created_at ASC'
+  ).all();
+  return json({ ok: true, passkeys: rows.results || [] });
+}
+
+async function passkeyRegisterOptions(request, env) {
+  const challenge = await makeChallengeCookie(request, env);
+  if (!challenge) throw new ApiError(503, '没有配置会话密钥，暂时不能添加通行密钥');
+  const rpId = rpIdFor(env, request);
+  const existing = await env.DB.prepare('SELECT id FROM admin_passkeys').all();
+  const userId = base64url(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('simple-link-admin')))
+  ).slice(0, 32);
+  return json(
+    {
+      ok: true,
+      options: {
+        challenge: challenge.challenge,
+        rp: { name: '简链', id: rpId },
+        user: { id: userId, name: 'admin', displayName: '简链管理员' },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        timeout: 60000,
+        attestation: 'none',
+        authenticatorSelection: {
+          residentKey: 'preferred',
+          userVerification: 'preferred'
+        },
+        excludeCredentials: (existing.results || []).map((row) => ({
+          type: 'public-key',
+          id: row.id
+        }))
+      }
+    },
+    200,
+    { 'Set-Cookie': challenge.cookie }
+  );
+}
+
+async function passkeyRegisterFinish(request, env) {
+  const challenge = await readChallengeCookie(request, env);
+  if (!challenge) throw new ApiError(400, '验证已过期，请重新开始');
+  const body = await readJson(request);
+  let verified;
+  try {
+    verified = await verifyRegistration({
+      attestationObject: String(body.attestationObject || ''),
+      clientDataJSON: String(body.clientDataJSON || ''),
+      expectedChallenge: challenge,
+      rpId: rpIdFor(env, request),
+      origin: originFor(env, request)
+    });
+  } catch (error) {
+    throw new ApiError(400, '通行密钥验证失败：' + error.message);
+  }
+  const name = String(body.name || '通行密钥').trim().slice(0, 40) || '通行密钥';
+  const now = Date.now();
+  try {
+    await env.DB.prepare(
+      'INSERT INTO admin_passkeys (id, username, name, public_key, counter, transports, created_at) ' +
+        'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)'
+    )
+      .bind(
+        verified.credentialId,
+        String(env.ADMIN_USERNAME || 'admin'),
+        name,
+        JSON.stringify(verified.publicKey),
+        verified.counter,
+        String(body.transports || '').slice(0, 120),
+        now
+      )
+      .run();
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new ApiError(409, '这个通行密钥已经添加过了');
+    throw error;
+  }
+  return json(
+    { ok: true, id: verified.credentialId },
+    201,
+    { 'Set-Cookie': clearPkCookieHeader(request) }
+  );
+}
+
+async function passkeyLoginOptions(request, env) {
+  const rows = await env.DB.prepare('SELECT id FROM admin_passkeys').all();
+  const passkeys = rows.results || [];
+  if (passkeys.length === 0) throw new ApiError(404, '还没有添加通行密钥');
+  const challenge = await makeChallengeCookie(request, env);
+  if (!challenge) throw new ApiError(503, '没有配置会话密钥，暂时不能使用通行密钥');
+  return json(
+    {
+      ok: true,
+      options: {
+        challenge: challenge.challenge,
+        rpId: rpIdFor(env, request),
+        timeout: 60000,
+        userVerification: 'preferred',
+        allowCredentials: passkeys.map((row) => ({ type: 'public-key', id: row.id }))
+      }
+    },
+    200,
+    { 'Set-Cookie': challenge.cookie }
+  );
+}
+
+async function passkeyLoginFinish(request, env) {
+  const challenge = await readChallengeCookie(request, env);
+  if (!challenge) throw new ApiError(400, '验证已过期，请重新开始');
+  const body = await readJson(request);
+  const id = String(body.id || '');
+  if (!id) throw new ApiError(400, '缺少通行密钥标识');
+  const row = await env.DB.prepare(
+    'SELECT id, username, public_key, counter FROM admin_passkeys WHERE id = ?1'
+  )
+    .bind(id)
+    .first();
+  if (!row) throw new ApiError(401, '通行密钥不存在');
+  let publicKey;
+  try {
+    publicKey = JSON.parse(row.public_key);
+  } catch {
+    throw new ApiError(401, '通行密钥数据损坏');
+  }
+  let verified;
+  try {
+    verified = await verifyAssertion({
+      credential: { publicKey, counter: Number(row.counter || 0) },
+      authenticatorData: String(body.authenticatorData || ''),
+      clientDataJSON: String(body.clientDataJSON || ''),
+      signature: String(body.signature || ''),
+      expectedChallenge: challenge,
+      rpId: rpIdFor(env, request),
+      origin: originFor(env, request)
+    });
+  } catch (error) {
+    throw new ApiError(401, '通行密钥验证失败：' + error.message);
+  }
+  await env.DB.batch([
+    env.DB.prepare('UPDATE admin_passkeys SET counter = ?1, last_used_at = ?2 WHERE id = ?3')
+      .bind(verified.counter, Date.now(), id),
+    env.DB.prepare('DELETE FROM admin_login_attempts WHERE ts < ?1')
+      .bind(Date.now() - DAY_MS)
+  ]);
+  const session = await loginWithPasskey(request, env, row.username);
+  return json(
+    { ok: true, authed: true, mode: session.session.mode, username: session.session.username },
+    200,
+    {
+      'Set-Cookie': [session.cookie, clearPkCookieHeader(request)]
+    }
+  );
+}
+
+async function deletePasskey(env, id) {
+  const result = await env.DB.prepare('DELETE FROM admin_passkeys WHERE id = ?1')
+    .bind(id)
+    .run();
+  if (!result.meta?.changes) throw new ApiError(404, '通行密钥不存在');
+  return json({ ok: true });
 }
 
 async function adminOverview(env, url) {
   const tz = env.TIMEZONE || 'Asia/Shanghai';
   const day = dayKey(tz);
   const query = String(url.searchParams.get('q') || '').trim().slice(0, 120);
-  const listSql = `SELECT code, url, created_at, expires_at, clicks, last_click_at, blocked
-    FROM links
-    ${query ? 'WHERE code LIKE ?1 OR url LIKE ?1' : ''}
-    ORDER BY created_at DESC LIMIT 40`;
+  const listSql =
+    'SELECT code, url, created_at, expires_at, clicks, last_click_at, blocked, owner_hash ' +
+    'FROM links ' +
+    (query ? 'WHERE code LIKE ?1 OR url LIKE ?1 ' : '') +
+    'ORDER BY created_at DESC LIMIT 40';
   const statement = query
-    ? env.DB.prepare(listSql).bind(`%${query}%`)
+    ? env.DB.prepare(listSql).bind('%' + query + '%')
     : env.DB.prepare(listSql);
 
   const [rows, totalRow, activeRow, todayLinksRow, todayClicksRow] = await Promise.all([
@@ -711,7 +916,10 @@ async function adminOverview(env, url) {
       todayLinks: todayLinksRow?.n || 0,
       todayClicks: todayClicksRow?.n || 0
     },
-    links: rows.results || []
+    links: (rows.results || []).map((row) => ({
+      ...row,
+      owner: Boolean(row.owner_hash)
+    }))
   });
 }
 
@@ -737,4 +945,12 @@ async function adminAction(request, env, code) {
     .run();
   if (!result.meta?.changes) throw new ApiError(404, '短链不存在');
   return json({ ok: true, code, action });
+}
+
+export async function cleanupAuth(env) {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM admin_sessions WHERE expires_at < ?1').bind(now),
+    env.DB.prepare('DELETE FROM admin_login_attempts WHERE ts < ?1').bind(now - DAY_MS)
+  ]);
 }

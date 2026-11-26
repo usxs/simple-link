@@ -1,8 +1,7 @@
 import { htmlResponse, redirect } from './http.js';
+import { clearAdminCookieHeader, loginWithBlog, ssoEnabled } from './auth.js';
 
 const BLOG_SESSION_COOKIE = 'console_session';
-const ADMIN_COOKIE = 'sl_admin';
-const ADMIN_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 const SSO_PATH = '/__simple_link_sso';
 const TOKEN_TTL_MS = 2 * 60 * 1000;
 const encoder = new TextEncoder();
@@ -102,19 +101,6 @@ function readCookie(request, name) {
   return '';
 }
 
-function cookieSecure(request) {
-  try {
-    return new URL(request.url).protocol === 'https:';
-  } catch {
-    return true;
-  }
-}
-
-function adminCookieHeader(request, token) {
-  const secure = cookieSecure(request) ? '; Secure' : '';
-  return ADMIN_COOKIE + '=' + encodeURIComponent(token) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + ADMIN_COOKIE_MAX_AGE + secure;
-}
-
 async function blogStatus(origin, token) {
   if (!origin || !token || token.length > 256) return null;
   try {
@@ -171,13 +157,22 @@ function signedOutPage(env) {
   <h1>还差一步</h1>
   <p>这个页面会读取你在「简单博客」的登录状态。现在还没有读到，请先去博客后台登录，再回来继续。</p>
   <p><a href="${escapeHtml(admin)}" target="_top">去登录简单博客</a><a class="secondary" href="${escapeHtml(retry)}" target="_top">已登录，继续</a></p>
-  ${local ? '<p class="hint">没有博客账号？<a class="text" href="' + escapeHtml(local) + '" target="_top">使用管理令牌登录</a></p>' : ''}
+  ${local ? '<p class="hint">没有博客账号？<a class="text" href="' + escapeHtml(local) + '" target="_top">使用其他方式登录简链</a></p>' : ''}
 </main>
 </html>`, 401, { noindex: true });
 }
 
+function ssoDisabledPage() {
+  return htmlResponse(
+    '<!doctype html><meta charset="utf-8"><title>未启用</title><p>管理员单点登录未启用。</p>',
+    404,
+    { noindex: true }
+  );
+}
+
 export async function handleBlogSso(request, env, url) {
   if (url.pathname !== SSO_PATH) return null;
+  if (!ssoEnabled(env)) return ssoDisabledPage();
   const origin = blogOrigin(env);
   const target = publicOrigin(env);
   if (!origin || !target || !String(env.BLOG_SSO_SECRET || '').trim()) {
@@ -208,6 +203,7 @@ export async function handleBlogSso(request, env, url) {
 
 export async function handleAdminSso(request, env, url) {
   if (url.pathname !== '/admin/sso') return null;
+  if (!ssoEnabled(env)) return ssoDisabledPage();
   const secret = String(env.BLOG_SSO_SECRET || '').trim();
   if (!secret) return htmlResponse('<!doctype html><meta charset="utf-8"><title>未配置</title><p>单点登录未配置。</p>', 404);
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -218,11 +214,13 @@ export async function handleAdminSso(request, env, url) {
   if (!payload) {
     const response = redirect('/admin?error=sso', 302);
     response.headers.set('Cache-Control', 'no-store');
+    response.headers.append('Set-Cookie', clearAdminCookieHeader(request));
     return response;
   }
 
+  const session = await loginWithBlog(request, env, payload.username || '简单博客');
   const response = redirect('/admin', 302);
-  response.headers.append('Set-Cookie', adminCookieHeader(request, payload.sid));
+  response.headers.append('Set-Cookie', session.cookie);
   response.headers.set('Cache-Control', 'no-store');
   response.headers.set('Referrer-Policy', 'no-referrer');
   return response;

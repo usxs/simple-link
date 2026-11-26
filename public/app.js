@@ -1,10 +1,12 @@
 const RECENT_KEY = 'simple-link:recent';
+const OWNER_KEY_STORAGE = 'simple-link:owner-key';
 const MAX_RECENT = 6;
 const SLUG_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
 const state = {
   config: null,
   latest: null,
+  ownerKey: readOwnerKey(),
   turnstileWidget: null,
   turnstileToken: '',
   turnstileWaiters: []
@@ -19,6 +21,7 @@ function init() {
   bindForm();
   bindCopy('#copy-url', () => state.latest?.link?.shortUrl || '');
   bindCopy('#copy-key', () => state.latest?.manageKey || '');
+  bindCopy('#copy-owner-key', () => state.latest?.ownerKey || state.ownerKey || '');
   bindRecentActions();
 
   $('#new-link').addEventListener('click', resetForm);
@@ -67,10 +70,6 @@ async function loadConfig() {
     state.config = data;
     paintTtlOptions(data);
     paintFooterLinks(data);
-    if (!data.adminEnabled) {
-      const adminLink = document.querySelector('.header-link');
-      if (adminLink) adminLink.remove();
-    }
     if (data.turnstileSiteKey) setupTurnstile(data.turnstileSiteKey);
   } catch (error) {
     setError('配置加载失败，生成功能可能不可用。');
@@ -164,8 +163,10 @@ function bindForm() {
     setLoading(true);
     try {
       const token = await waitForTurnstileToken();
+      const ownerKey = readOwnerKey();
       const data = await api('/api/links', {
         method: 'POST',
+        headers: ownerKey ? { 'X-Owner-Key': ownerKey } : {},
         body: JSON.stringify({
           url,
           slug: slug || undefined,
@@ -173,6 +174,10 @@ function bindForm() {
           turnstileToken: token || undefined
         })
       });
+      if (data.ownerKey) {
+        state.ownerKey = data.ownerKey;
+        writeOwnerKey(data.ownerKey);
+      }
       state.latest = data;
       showResult(data);
       renderQuota(data.quota);
@@ -227,6 +232,14 @@ function showResult(data) {
   $('#result-expiry').textContent = '到期 ' + formatDate(link.expiresAt);
   $('#manage-key').textContent = data.manageKey;
   $('#delete-link').disabled = false;
+
+  const ownerBox = $('#owner-key-box');
+  if (data.ownerKey) {
+    $('#owner-key').textContent = data.ownerKey;
+    ownerBox.hidden = false;
+  } else {
+    ownerBox.hidden = true;
+  }
 
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     $('#result').scrollIntoView({ block: 'nearest' });
@@ -328,6 +341,23 @@ function flashCopied(button) {
 }
 
 /* ---------- 最近记录 ---------- */
+
+function readOwnerKey() {
+  try {
+    const key = localStorage.getItem(OWNER_KEY_STORAGE) || '';
+    return /^[A-Za-z0-9_-]{24,128}$/.test(key) ? key : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function writeOwnerKey(key) {
+  try {
+    localStorage.setItem(OWNER_KEY_STORAGE, key);
+  } catch (error) {
+    /* 忽略存储失败 */
+  }
+}
 
 function readRecent() {
   try {

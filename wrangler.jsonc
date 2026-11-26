@@ -11,11 +11,13 @@
     "run_worker_first": true
   },
 
+  // 这是给一键部署使用的可移植配置。
+  // Cloudflare 会按 database_name 自动创建 D1，并把下面的占位 ID 替换成真实 ID。
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "simple-link",
-      "database_id": "8925046f-360c-4521-95e1-3f14e1bc20ca",
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
@@ -29,44 +31,22 @@
     "enabled": true
   },
 
-  // 短链服务使用 s.wn.tn 子域，避免影响 wn.tn 现有站点
-  "routes": [
-    { "pattern": "s.wn.tn", "custom_domain": true },
-    // 仅接管博客域名的 /__simple_link_sso 单点登录入口；其他路径仍走博客源站
-    { "pattern": "api.starspace.cc/__simple_link_sso", "zone_name": "starspace.cc" }
-  ],
-
+  // 一键部署不绑定自定义域名，先使用 Workers 分配的 *.workers.dev 地址。
+  // 部署完成后可在控制台绑定域名，或参考 wrangler.production.jsonc 的写法。
   "vars": {
-    // 公开配置，可以按需要调整
     "TIMEZONE": "Asia/Shanghai",
     "DAILY_LINK_LIMIT": "10",
     "ACTIVE_LINK_LIMIT": "30",
     "DEFAULT_TTL_DAYS": "365",
     "MAX_TTL_DAYS": "365",
     "TURNSTILE_SITE_KEY": "",
-
-    // 可选：强制短链使用固定域名（如 https://s.usxs.net）。留空 = 跟随当前访问域名
-    "PUBLIC_ORIGIN": "https://s.wn.tn",
-
-    // 可选：禁止缩短的域名，逗号分隔，子域名同样生效（如 "spam.example,bad.tld"）
+    "PUBLIC_ORIGIN": "",
     "BLOCKED_HOSTS": "",
-
-    // 可选：站点与友链。留空则不显示对应入口
-    "SIBLING_URL": "https://mail.wn.tn",
-    "BLOG_URL": "https://www.starspace.cc",
+    "SIBLING_URL": "",
+    "BLOG_URL": "",
     "REPO_URL": "https://github.com/usxs/simple-link",
-
-    // 可选：接入「简单博客」账号登录。填写博客的根地址，例如 https://blog.example.com
-    // 留空时只使用 ADMIN_TOKEN 登录。
-    "BLOG_ORIGIN": "https://api.starspace.cc",
-
-    // 可选：博客登录 Cookie 所在的父域，例如 .wn.tn。
-    // 只有博客和简链在同一个可注册域名下时才需要，用来退出时清除共享 Cookie。
-    "BLOG_COOKIE_DOMAIN": ""
+    "BLOG_ORIGIN": "",
+    "BLOG_COOKIE_DOMAIN": "",
+    "BLOG_SSO_ENABLED": "false"
   }
-
-  // 自定义域名示例（按需取消注释并改成自己的域名）：
-  // "routes": [
-  //   { "pattern": "s.example.com", "custom_domain": true }
-  // ]
 }

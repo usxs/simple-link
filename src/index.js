@@ -1,5 +1,5 @@
 import { ApiError, htmlResponse, json, protect, redirect } from './http.js';
-import { handleApi } from './api.js';
+import { cleanupAuth, handleApi } from './api.js';
 import { handleAdminSso, handleBlogSso } from './sso.js';
 import { renderErrorPage, renderStatsPage } from './pages.js';
 import { dayKey, safeHttpUrl } from './util.js';
@@ -11,7 +11,14 @@ const ASSET_PATHS = new Set([
   '/theme.js',
   '/app.js',
   '/admin.js',
+  '/manage.js',
+  '/manage.html',
   '/favicon.svg',
+  '/favicon.ico',
+  '/favicon-32.png',
+  '/favicon-192.png',
+  '/favicon-512.png',
+  '/apple-touch-icon.png',
   '/robots.txt',
   '/manifest.webmanifest'
 ]);
@@ -27,7 +34,7 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
-    const job = cleanupExpired(env).catch((error) => {
+    const job = Promise.all([cleanupExpired(env), cleanupAuth(env)]).catch((error) => {
       console.error('scheduled cleanup failed', error);
     });
     if (ctx?.waitUntil) ctx.waitUntil(job);
@@ -63,12 +70,12 @@ async function route(request, env, ctx, url) {
     return serveAsset(request, env, '/admin.html', { html: true, noindex: true });
   }
 
-  if (ASSET_PATHS.has(pathname)) {
-    return env.ASSETS.fetch(request);
+  if (pathname === '/manage' || pathname === '/manage/' || pathname === '/manage.html') {
+    return serveAsset(request, env, '/manage.html', { html: true, noindex: true });
   }
 
-  if (pathname === '/favicon.ico') {
-    return redirect('/favicon.svg', 308);
+  if (ASSET_PATHS.has(pathname)) {
+    return env.ASSETS.fetch(request);
   }
 
   const statsMatch = pathname.match(/^\/([A-Za-z0-9_-]{1,32})\+$/);

@@ -1306,6 +1306,11 @@ textarea {
     display: none;
   }
 
+  .header-link.manage-link {
+    display: inline;
+    font-size: 12px;
+  }
+
   .result-actions {
     flex-wrap: wrap;
     gap: 10px 14px;
@@ -1329,5 +1334,197 @@ textarea {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- auth & owner management ---------- */
+
+.auth-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 20px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.auth-tab {
+  flex: 1;
+  min-width: 88px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.auth-tab:hover {
+  color: var(--text-primary);
+}
+
+.auth-tab[aria-selected="true"] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.auth-panel[hidden] {
+  display: none !important;
+}
+
+.auth-panel .btn-block {
+  margin-top: 16px;
+}
+
+.auth-lead {
+  margin: 0 0 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.passkey-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.passkey-actions .input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.passkey-item strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.passkey-item .meta {
+  display: block;
+  margin-top: 3px;
+}
+
+.passkey-list {
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.passkey-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.passkey-item .meta {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.passkey-empty {
+  padding: 14px 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.passkey-box {
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.passkey-box summary {
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.passkey-box .form-hint {
+  max-width: 620px;
+}
+
+.owner-key-box {
+  margin-top: 20px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--status-ok) 34%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--status-ok) 6%, transparent);
+}
+
+.owner-key-box .manage-key-row {
+  margin-top: 0;
+}
+
+.owner-key-box p {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.manage-title-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.manage-title-row h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.manage-title-row p {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.manage-filter {
+  margin-bottom: 16px;
+}
+
+.manage-key-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.manage-key-display code {
+  flex: 1;
+  min-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .auth-tab {
+    min-width: 76px;
+  }
+
+  .manage-title-row h1 {
+    font-size: 26px;
   }
 }

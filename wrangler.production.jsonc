@@ -1,0 +1,52 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "simple-link",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "simple-link",
+      "database_id": "8925046f-360c-4521-95e1-3f14e1bc20ca",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "triggers": {
+    "crons": ["41 3 * * *"]
+  },
+
+  "observability": {
+    "enabled": true
+  },
+
+  // 线上实例（s.wn.tn）；第二条路由只接管博客域名的单点登录入口
+  "routes": [
+    { "pattern": "s.wn.tn", "custom_domain": true },
+    { "pattern": "api.starspace.cc/__simple_link_sso", "zone_name": "starspace.cc" }
+  ],
+
+  "vars": {
+    "TIMEZONE": "Asia/Shanghai",
+    "DAILY_LINK_LIMIT": "10",
+    "ACTIVE_LINK_LIMIT": "30",
+    "DEFAULT_TTL_DAYS": "365",
+    "MAX_TTL_DAYS": "365",
+    "TURNSTILE_SITE_KEY": "",
+    "PUBLIC_ORIGIN": "https://s.wn.tn",
+    "BLOCKED_HOSTS": "",
+    "SIBLING_URL": "https://mail.wn.tn",
+    "BLOG_URL": "https://www.starspace.cc",
+    "REPO_URL": "https://github.com/usxs/simple-link",
+    "BLOG_ORIGIN": "https://api.starspace.cc",
+    "BLOG_COOKIE_DOMAIN": "",
+    "BLOG_SSO_ENABLED": "true"
+  }
+}

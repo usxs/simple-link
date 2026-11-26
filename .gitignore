@@ -3,5 +3,7 @@
 !.dev.vars.example
 .wrangler/
 .wrangler-dist/
+.wrangler-dist-prod/
+.wrangler-home/
 node_modules/
 .DS_Store

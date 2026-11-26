@@ -6,9 +6,11 @@
   "description": "简链 — 可部署在 Cloudflare Workers 的公益短链接服务",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply simple-link --remote",
-    "db:migrate:local": "wrangler d1 migrations apply simple-link --local",
+    "deploy": "npm run db:migrate && wrangler deploy",
+    "deploy:prod": "npm run db:migrate:prod && wrangler deploy --config wrangler.production.jsonc",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:prod": "wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc",
     "tail": "wrangler tail",
     "check": "wrangler deploy --dry-run --outdir .wrangler-dist"
   },
