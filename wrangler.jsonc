@@ -1,0 +1,62 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "simple-link",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  // 静态资源由 Worker 统一处理：/api/*、短码跳转、统计页、404 页都需要经过 Worker
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "simple-link",
+      "database_id": "8925046f-360c-4521-95e1-3f14e1bc20ca",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // 每日清理过期短链与配额记录（UTC 03:41）
+  "triggers": {
+    "crons": ["41 3 * * *"]
+  },
+
+  "observability": {
+    "enabled": true
+  },
+
+  // 短链服务使用 s.wn.tn 子域，避免影响 wn.tn 现有站点
+  "routes": [
+    { "pattern": "s.wn.tn", "custom_domain": true }
+  ],
+
+  "vars": {
+    // 公开配置，可以按需要调整
+    "TIMEZONE": "Asia/Shanghai",
+    "DAILY_LINK_LIMIT": "10",
+    "ACTIVE_LINK_LIMIT": "30",
+    "DEFAULT_TTL_DAYS": "365",
+    "MAX_TTL_DAYS": "365",
+    "TURNSTILE_SITE_KEY": "",
+
+    // 可选：强制短链使用固定域名（如 https://s.usxs.net）。留空 = 跟随当前访问域名
+    "PUBLIC_ORIGIN": "https://s.wn.tn",
+
+    // 可选：禁止缩短的域名，逗号分隔，子域名同样生效（如 "spam.example,bad.tld"）
+    "BLOCKED_HOSTS": "",
+
+    // 可选：站点与友链。留空则不显示对应入口
+    "SIBLING_URL": "https://mail.wn.tn",
+    "BLOG_URL": "",
+    "REPO_URL": ""
+  }
+
+  // 自定义域名示例（按需取消注释并改成自己的域名）：
+  // "routes": [
+  //   { "pattern": "s.example.com", "custom_domain": true }
+  // ]
+}

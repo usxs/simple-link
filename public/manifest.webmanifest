@@ -1,0 +1,12 @@
+{
+  "name": "简链",
+  "short_name": "简链",
+  "description": "公益、克制的短链服务。",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F7F8",
+  "theme_color": "#F7F7F8",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
